@@ -19,8 +19,9 @@ phases. Each table lists steps in the order they run: the tool, what it does and
 stops progression, the SIG task it aligns to, and a SIG-listed alternative.
 
 Scope: containerized services on Kubernetes, from onboarding a service to remediating a
-finding. Out of scope: design-time practices such as threat modeling, cluster provisioning,
-Git host choice, language-specific tooling, and malware scanning (no SIG-listed tool).
+finding. Out of scope: design-time practices such as threat modeling, cluster provisioning
+and hardening, identity providers and workload identity, Git host choice, language-specific
+tooling, and malware scanning (no SIG-listed tool).
 
 ## End-to-end delivery architecture
 
@@ -107,24 +108,30 @@ Validate the source revision before its image is built.
 flowchart LR
     subgraph BT["Tekton build and test run"]
         direction TB
-        S["Semgrep CE"]
-        T["TruffleHog"]
+        S["Opengrep"]
+        T["Betterleaks"]
         K["Checkov"]
         SG["Syft + Grype<br/>source"]
     end
     O["Backstage template<br/>once per service"] -.-> GH["Git host"] --> E["Git event"] --> P["Pipelines-as-Code"] --> BT
+    PC["Betterleaks<br/>pre-commit"] --> GH
     BT --> N(["Build and scan"])
 ```
 
 | Tool | What it does here, and why | Blocks when | SIG task | SIG-listed alternative |
 | --- | --- | --- | --- | --- |
-| Backstage Software Templates | Once per service, creates what later steps assume exists: the repo with its pipeline definition, Argo CD applications for the test and release paths, a namespace labelled with the owning team, a DefectDojo product owned by that team, a Dependency-Track project, and the catalog entry. Any template system that creates the same set can replace it; not needed at runtime | — | [1.1 PO.3.1](https://cybersecurity.cd.foundation/docs/phase-1/ssdf/ssdf-po/) | Konflux (factory; brings its own pipeline and release model) |
-| Git host (any) | Protected default branch, required review before merge, signed commits. The merge is the team's approval of the change; the pipeline doesn't re-approve it | Unreviewed or unsigned change: no merge | [1.2 PS.1.1](https://cybersecurity.cd.foundation/docs/phase-1/ssdf/ssdf-ps/), [1.1 PO.5.1](https://cybersecurity.cd.foundation/docs/phase-1/ssdf/ssdf-po/) | — |
+| Backstage Software Templates | Once per service, creates what later steps assume exists: the repo with its pipeline definition, pre-commit config and a CODEOWNERS file naming the owning team, Argo CD applications for the test and release paths, a namespace labelled with the owning team, a DefectDojo product owned by that team, a Dependency-Track project, and the catalog entry. Any template system that creates the same set can replace it; not needed at runtime | — | [1.1 PO.3.1](https://cybersecurity.cd.foundation/docs/phase-1/ssdf/ssdf-po/) | Konflux (factory; brings its own pipeline and release model) |
+| Betterleaks † (pre-commit) | Checks each new commit on the developer's machine with the secret-scanning config the template adds, so a secret is caught before it's pushed. It can be skipped, so the CI scan is the gate | Secret found: commit refused locally | [1.3 PW.8.2](https://cybersecurity.cd.foundation/docs/phase-1/ssdf/ssdf-pw/) | Gitleaks |
+| Git host (any) | Protected default branch, review by code owners before merge, signed commits, MFA for every account. The merge is the team's approval of the change; the pipeline doesn't re-approve it | Unreviewed or unsigned change: no merge | [1.2 PS.1.1](https://cybersecurity.cd.foundation/docs/phase-1/ssdf/ssdf-ps/), [1.1 PO.5.1](https://cybersecurity.cd.foundation/docs/phase-1/ssdf/ssdf-po/), [1.1 PO.2.1](https://cybersecurity.cd.foundation/docs/phase-1/ssdf/ssdf-po/) | — |
 | Pipelines-as-Code | Starts a Tekton build and test run for each PR or merge at its exact commit, using the default branch's pipeline definition. PRs from forks run only after a maintainer's `/ok-to-test`. Posts status and report links to the commit | Unsigned webhook, or repo or event not allowed: no run | [1.1 PO.3.2](https://cybersecurity.cd.foundation/docs/phase-1/ssdf/ssdf-po/) | — |
-| Semgrep CE | Static analysis with open source rules. Which rule source is still unresolved: Semgrep's maintained rule set isn't open source | Finding above the team's criteria | [1.3 PW.7.2](https://cybersecurity.cd.foundation/docs/phase-1/ssdf/ssdf-pw/) | Bandit (Python only) |
-| TruffleHog | Scans the commit history for secrets, with live verification off | Any unresolved secret | [1.3 PW.8.2](https://cybersecurity.cd.foundation/docs/phase-1/ssdf/ssdf-pw/) | Gitleaks |
+| Opengrep † | Static analysis with OSI-licensed community rules, such as Trail of Bits' (AGPL-3.0) and GitLab's (MIT) | Finding above the team's criteria | [1.3 PW.7.2](https://cybersecurity.cd.foundation/docs/phase-1/ssdf/ssdf-pw/) | Semgrep CE (same engine and rule format); Bandit (Python only) |
+| Betterleaks † | Scans the run's commits for secrets with the same config as the pre-commit hook, without contacting credential providers. Its 1.x JSON report imports through DefectDojo's Gitleaks parser | Any unresolved secret | [1.3 PW.8.2](https://cybersecurity.cd.foundation/docs/phase-1/ssdf/ssdf-pw/) | TruffleHog (adds live verification) |
 | Checkov | Scans the Dockerfile, Kubernetes manifests, Helm or Kustomize sources and any Terraform in the repo for misconfigurations | Any failed check | [1.3 PW.2.1](https://cybersecurity.cd.foundation/docs/phase-1/ssdf/ssdf-pw/) | KICS |
-| Syft + Grype | Inventories source dependencies and checks them for known vulnerabilities, so developers see problems before the build | Vulnerability above the team's criteria | [1.3 PW.6.1–PW.6.2](https://cybersecurity.cd.foundation/docs/phase-1/ssdf/ssdf-pw/) | Trivy (does both; SIG lists it under PW.2.1) |
+| Syft + Grype | Inventories source dependencies and checks them for known vulnerabilities, applying the repo's OpenVEX statements, so developers see problems before the build | Vulnerability above the team's criteria | [1.3 PW.6.1–PW.6.2](https://cybersecurity.cd.foundation/docs/phase-1/ssdf/ssdf-pw/) | Trivy (does both; SIG lists it under PW.2.1) |
+
+† Not in the SIG's list. The SIG lists Semgrep, but Semgrep's maintained rules aren't open
+source; Opengrep is an LGPL-2.1 fork of the Semgrep CE engine. The SIG lists Gitleaks, which
+now receives security fixes only; Betterleaks is its successor from the same authors.
 
 ## Phase 2: Build and Deploy
 
@@ -151,12 +158,13 @@ flowchart LR
 | App build, lint and unit tests | Tekton runs the application's own build, lint and unit-test commands, in a pipeline task or the Dockerfile's build stage | Any command fails | — | — |
 | BuildKit † | Builds the image from a multistage Dockerfile with a digest-pinned base image, in a pod created for this run with no shared cache. Dependencies are fetched first (Hermeto), so the build step itself needs no network. PR runs keep the image as a local file; merges push it to Harbor by digest | Build fails | [2.3 PW.6.1–PW.6.2](https://cybersecurity.cd.foundation/docs/phase-2/ssdf/ssdf-pw/) | apko (builds from a package list, no Dockerfile) |
 | Syft | Generates the finished image's CycloneDX SBOM. On merges, Cosign signs it as an attestation on the image (`cosign attest`) | — | [2.3 PW.6.1–PW.6.2](https://cybersecurity.cd.foundation/docs/phase-2/ssdf/ssdf-pw/); Cosign: [2.2 PS.2.1](https://cybersecurity.cd.foundation/docs/phase-2/ssdf/ssdf-ps/) | Trivy (also scans) |
-| Grype | Checks the image SBOM for known vulnerabilities. Its result names the digest it checked | Vulnerability above the team's criteria | [2.1 PO.4.1–PO.4.2](https://cybersecurity.cd.foundation/docs/phase-2/ssdf/ssdf-po/) | Trivy |
+| Grype | Checks the image SBOM for known vulnerabilities, applying the repo's OpenVEX statements. Its result names the digest it checked | Vulnerability above the team's criteria | [2.1 PO.4.1–PO.4.2](https://cybersecurity.cd.foundation/docs/phase-2/ssdf/ssdf-po/) | Trivy |
 | Chains: image signature | Signs each pushed image as soon as its build task finishes, with a key only Chains can read. The signature sits next to the image in Harbor | Signing unavailable: Kyverno won't admit the image | [2.2 PS.1.1](https://cybersecurity.cd.foundation/docs/phase-2/ssdf/ssdf-ps/) | Cosign (explicit signing step); keyless signing with the run's own identity (Fulcio) |
 | Harbor | Stores the image with its SBOM, signature and provenance, all by digest. Tags are immutable and retention never removes a released digest. The build and Chains push with separate robot accounts | Push from any other account | [2.2 PS.3.1](https://cybersecurity.cd.foundation/docs/phase-2/ssdf/ssdf-ps/) | — |
 
-† BuildKit isn't listed by the SIG for this task. It's included as the most widely used
-Dockerfile builder (Docker's default).
+† Not in the SIG's list. The SIG lists reproducible or hermetic build systems (Nix, Bazel,
+apko, Hermeto) but no image builder. BuildKit is the most widely used Dockerfile builder;
+Hermeto's prefetch and the network-off build make it hermetic, not reproducible.
 
 ### Test the candidate
 
@@ -203,12 +211,15 @@ flowchart LR
 
 | Tool | What it does here, and why | Blocks when | SIG task | SIG-listed alternative |
 | --- | --- | --- | --- | --- |
-| Conforma | Fetches the signature and every attestation on the digest from Harbor and verifies them against the Chains key, then evaluates the versioned release policy on their contents: every required check present, passed and bound to this digest; source commit matches the Git event; SBOM present. A check that never ran fails like one that failed. Writes its report for the release record (SBOM format and provenance version to validate) | A required check missing, failed or skipped; results for another digest; signature or SBOM attestation missing | [2.1 PO.1.1](https://cybersecurity.cd.foundation/docs/phase-2/ssdf/ssdf-po/) | Open Policy Agent (Conftest; you write the signature and provenance rules) |
+| Conforma ‡ | Fetches the signature and every attestation on the digest from Harbor and verifies them against the Chains key, then evaluates the versioned release policy on their contents: every required check present, passed and bound to this digest; source commit matches the Git event; SBOM present. A check that never ran fails like one that failed. Writes its report for the release record (SBOM format and provenance version to validate) | A required check missing, failed or skipped; results for another digest; signature or SBOM attestation missing | [2.1 PO.1.1](https://cybersecurity.cd.foundation/docs/phase-2/ssdf/ssdf-po/) | Open Policy Agent (Conftest; you write the signature and provenance rules) |
 | Dependency-Track | Registers the image SBOM under the service and digest, and confirms processing finished | Registration not confirmed | [3.1 PO.3.1](https://cybersecurity.cd.foundation/docs/phase-3/ssdf/ssdf-po/) | Ortelius |
 | git-cli (Tekton catalog) | Commits the approved digest and Conforma's report to the release Git path. This commit is the release approval and the release record | Another writer, or the Git head moved since Conforma's check | — | — |
 | Deploy and verify task | Tekton catalog tasks have Argo CD sync production and wait for health; a final step checks the running pods use the released digest (integration) | Sync fails, app unhealthy, or wrong digest running | — | — |
 | Argo CD | Syncs production from the release path only | Sync fails | [2.1 PO.2.1](https://cybersecurity.cd.foundation/docs/phase-2/ssdf/ssdf-po/) | Flux CD (listed for PO.2); Argo Rollouts (adds canary) |
 | Kyverno | Admits only images signed by Chains, referenced by digest and carrying the run provenance attestation: the runtime backstop, so nothing reaches production except through the release path, whatever client applies it. The release policy itself stays in Conforma. Background scans re-check running workloads (to validate). Also enforces workload rules such as non-root and no privileged pods | Any violation | [2.1 PO.5.1–PO.5.2](https://cybersecurity.cd.foundation/docs/phase-2/ssdf/ssdf-po/), [2.2 PS.3.1](https://cybersecurity.cd.foundation/docs/phase-2/ssdf/ssdf-ps/) | Open Policy Agent (needs a separate signature-verification add-on) |
+
+‡ Conforma is maintained mainly by Red Hat and hasn't reached 1.0. Teams that can't accept a
+single-vendor governance dependency should evaluate Open Policy Agent (Conftest) for this role.
 
 Conforma decides once whether this digest may be released. Kyverno decides every time
 whether a pod may run. Build provenance (Chains) records how the image was built; the
@@ -223,19 +234,26 @@ Monitor deployed software and route findings through fix and reassessment.
 
 ```mermaid
 flowchart LR
-    DT["Dependency-Track"] --> DD["DefectDojo"]
-    V(["Build and test run reports"]) --> DD
-    R(["Release run:<br/>fix confirmed running"]) -->|new scan confirms fix| DD
-    DD --> T["Service team<br/>set at onboarding"]
+    DT["Dependency-Track:<br/>monitoring"] --> DDI["DefectDojo:<br/>intake"]
+    V(["Build and test run reports"]) --> DDI
+    DDI --> T["Service team<br/>set at onboarding"]
     F["Falco + Falcosidekick"] --> T
-    T --> N(["Fix: new commit"])
+    T --> N(["Fix or OpenVEX<br/>statement: new commit"])
     RN["Renovate"] -->|update PR| N
+    T -->|not affected| NA["Dependency-Track:<br/>not affected"]
+    NA -.->|suppressed| DDC["DefectDojo:<br/>closure"]
+    R(["Release run:<br/>fix confirmed running"]) -->|new scan confirms fix| DDC
 ```
 
 | Tool | What it does here, and why | Blocks when | SIG task | SIG-listed alternative |
 | --- | --- | --- | --- | --- |
-| Dependency-Track | Re-checks every released SBOM as new vulnerabilities are published | No gate; raises findings | [3.4 RV.1.1](https://cybersecurity.cd.foundation/docs/phase-3/ssdf/ssdf-rv/) | Ortelius |
-| DefectDojo | Holds every build and test run report, including failed runs, with the original files attached, plus Dependency-Track findings; deduplicates them and notifies the product's team, set at onboarding | Failed imports stay visible and are retried | [3.4 RV.2.1](https://cybersecurity.cd.foundation/docs/phase-3/ssdf/ssdf-rv/) | Ortelius |
-| Renovate | Opens pull requests that update vulnerable or outdated dependencies, so the fix for a dependency finding is usually waiting as a PR. Merging it re-enters phase 1 | — | [2.4 RV.2.1–RV.2.2](https://cybersecurity.cd.foundation/docs/phase-2/ssdf/ssdf-rv/) | — |
+| Dependency-Track: monitoring | Re-checks every released SBOM as new vulnerabilities are published | No gate; raises findings | [3.4 RV.1.1](https://cybersecurity.cd.foundation/docs/phase-3/ssdf/ssdf-rv/) | Ortelius |
+| DefectDojo: intake | Holds every build and test run report, including failed runs, with the original files attached, plus Dependency-Track findings; deduplicates them and notifies the product's team, set at onboarding | Failed imports stay visible and are retried | [3.4 RV.2.1](https://cybersecurity.cd.foundation/docs/phase-3/ssdf/ssdf-rv/) | Ortelius |
+| Renovate ‡ | Opens pull requests that update outdated dependencies and, with `osvVulnerabilityAlerts`, one as soon as a fix exists for a newly published vulnerability, so the fix for a dependency finding is usually waiting as a PR. Merging it re-enters phase 1 | — | [2.4 RV.2.1–RV.2.2](https://cybersecurity.cd.foundation/docs/phase-2/ssdf/ssdf-rv/) | — |
 | Falco + Falcosidekick | Detects suspicious runtime behavior and alerts the service's team, routed by the namespace label set at onboarding | No gate | [3.1 PO.5.1–PO.5.2](https://cybersecurity.cd.foundation/docs/phase-3/ssdf/ssdf-po/) | — |
-| DefectDojo | Findings close after the fix is deployed and a new, complete scan confirms it, or a not-affected decision is recorded as OpenVEX, which Grype applies on the next scan (integration). History shows repeat issues | Failed or incomplete scans never close findings | [3.4 RV.2.1](https://cybersecurity.cd.foundation/docs/phase-3/ssdf/ssdf-rv/), [3.4 RV.3.1–RV.3.2](https://cybersecurity.cd.foundation/docs/phase-3/ssdf/ssdf-rv/); OpenVEX: [3.4 RV.1.1](https://cybersecurity.cd.foundation/docs/phase-3/ssdf/ssdf-rv/) | — |
+| Dependency-Track: not affected | The service team records a not-affected decision with its justification and suppresses the finding, so Dependency-Track stops raising it and leaves it out of its DefectDojo sync. The same decision goes into the service repo as an OpenVEX statement naming the affected package, through a reviewed PR; Grype applies it in both its scans | — | [3.4 RV.2.1–RV.2.2](https://cybersecurity.cd.foundation/docs/phase-3/ssdf/ssdf-rv/); OpenVEX: [3.4 RV.1.1](https://cybersecurity.cd.foundation/docs/phase-3/ssdf/ssdf-rv/) | — |
+| DefectDojo: closure | Findings close when a new, complete scan no longer reports them: the fix is deployed, or a not-affected decision is recorded in both places. History shows repeat issues | Failed or incomplete scans never close findings | [3.4 RV.2.1](https://cybersecurity.cd.foundation/docs/phase-3/ssdf/ssdf-rv/), [3.4 RV.3.1–RV.3.2](https://cybersecurity.cd.foundation/docs/phase-3/ssdf/ssdf-rv/) | — |
+
+‡ The SIG lists Renovate in phase 2. It's here because it opens the fix for findings raised
+after deployment; its vulnerability alerts cover direct dependencies only, and
+Dependency-Track covers the rest.
